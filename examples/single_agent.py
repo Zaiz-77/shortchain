@@ -15,7 +15,7 @@
     OPENAI_DEFAULT_MODEL=...
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from shortchain import Agent, tool
 
 
@@ -71,11 +71,13 @@ def example_basic():
 
 
 class TravelPlan(BaseModel):
-    destination: str
-    best_season: str
-    estimated_days: int
-    highlights: list[str]
-    budget_cny: int
+    """旅行规划结果，包含目的地、季节、天数、亮点和预算。"""
+
+    destination: str = Field(description="旅行目的地城市名，如「成都」")
+    best_season: str = Field(description="最佳旅行季节，如「春季（3-4月）」")
+    estimated_days: int = Field(description="建议游览天数（整数）")
+    highlights: list[str] = Field(description="必游景点或体验，3-5 条")
+    budget_cny: int = Field(description="预计人均旅行总预算（人民币元）")
 
 
 def example_structured_output():

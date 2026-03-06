@@ -264,17 +264,18 @@ class CoAgent:
             desc = (
                 agent._base_system_prompt.strip().splitlines()[0]
                 if agent._base_system_prompt
-                else "通用助手"
+                else "general assistant"
             )
             agent_descs.append(f"- {agent.name}: {desc}")
 
         system = (
-            "你是一个团队协调者，负责将用户任务分配给最合适的成员。\n"
+            "You are a team coordinator. Your job is to assign the user's task to the "
+            "most suitable team member.\n"
             + (self.coordinator_prompt + "\n" if self.coordinator_prompt else "")
-            + "团队成员：\n"
+            + "Team members:\n"
             + "\n".join(agent_descs)
             + "\n\n"
-            "请只回复成员名称（精确匹配），不要输出任何其他内容。"
+            "Reply with the member name only (exact match). Output nothing else."
         )
         response = self._client.chat.completions.create(
             model=self.model,

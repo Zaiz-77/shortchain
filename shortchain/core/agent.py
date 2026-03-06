@@ -207,11 +207,27 @@ class Agent:
         if skill_instructions:
             parts.append(skill_instructions)
 
-        # 注入长期记忆摘要（最近 5 条）
+        # Inject long-term memory summaries (last 5)
         if self.long_term_memory:
             summary_text = self.long_term_memory.get_summaries_text(last_n=5)
             if summary_text:
-                parts.append(f"## 历史记忆摘要\n{summary_text}")
+                parts.append(f"## Memory Summaries\n{summary_text}")
+
+        # Inject structured output requirement upfront so the LLM outputs JSON on the
+        # first call, avoiding a second round-trip.
+        if self.response_model is not None:
+            import json as _json
+            from shortchain.tools.base import _strip_schema_titles
+
+            schema = self.response_model.model_json_schema()
+            _strip_schema_titles(schema)
+            parts.append(
+                "## Output Format\n"
+                "Your final answer MUST be a valid JSON object that conforms to the "
+                "following JSON Schema. Output only the JSON — no extra text, "
+                "explanations, or markdown code blocks:\n"
+                + _json.dumps(schema, ensure_ascii=False)
+            )
 
         return "\n\n".join(parts)
 

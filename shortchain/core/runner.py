@@ -67,8 +67,12 @@ class ReActRunner:
             if not tool_calls:
                 # LLM 不再调用工具，这是最终答复
                 if agent.response_model is not None:
-                    # 把当前完整对话传给结构化输出接口
-                    return self._coerce_to_model(memory.to_openai_messages())
+                    # 优先直接解析（system prompt 已注入 schema，LLM 通常直接输出 JSON）
+                    try:
+                        return self._parse_response_model(response_msg.content or "")
+                    except Exception:
+                        # 解析失败则兜底：追加格式要求再调用一次
+                        return self._coerce_to_model(memory.to_openai_messages())
                 return response_msg.content or ""
 
             # 执行所有工具调用，把结果追加到记忆
@@ -84,7 +88,11 @@ class ReActRunner:
 
         # 超过最大迭代次数，强制返回
         if agent.response_model is not None:
-            return self._coerce_to_model(memory.to_openai_messages())
+            last_content = memory.get_history()[-1].content or ""
+            try:
+                return self._parse_response_model(last_content)
+            except Exception:
+                return self._coerce_to_model(memory.to_openai_messages())
         last = memory.get_history()[-1]
         return last.content or ""
 
@@ -163,8 +171,8 @@ class ReActRunner:
             {
                 "role": "user",
                 "content": (
-                    "请将上面的回答整理为符合以下 JSON Schema 的 JSON 对象，"
-                    "只输出 JSON，不要有任何其他内容：\n"
+                    "Reformat your previous answer as a valid JSON object that conforms "
+                    "to the following JSON Schema. Output only the JSON, nothing else:\n"
                     + json.dumps(schema, ensure_ascii=False)
                 ),
             }
