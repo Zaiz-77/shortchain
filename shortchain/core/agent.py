@@ -53,9 +53,17 @@ class Agent:
     max_messages:
         短期记忆保留的最大消息条数，默认 50。
     enable_long_term_memory:
-        是否启用长期记忆（本地文件持久化），默认 False。    tool_calling:
+        是否启用长期记忆（本地文件持久化），默认 False。
+    tool_calling:
         是否启用 function calling（工具调用），默认 True。
-        若使用的模型/端点不支持 tools 参数，请设为 False。"""
+        若使用的模型/端点不支持 tools 参数，请设为 False。
+    stream:
+        是否对最终输出启用流式打印，默认 False。
+        为 True 时，最终回答的 token 会实时输出到 stdout；
+        对 response_model 无效（结构化输出仍需完整 JSON）。
+    verbose:
+        是否打印 ReAct 执行过程，默认 False。
+        为 True 时，每轮迭代的 Thought / Action / Observation 会输出到 stdout。"""
 
     def __init__(
         self,
@@ -71,6 +79,8 @@ class Agent:
         max_messages: int = 50,
         enable_long_term_memory: bool = False,
         tool_calling: bool = True,
+        stream: bool = False,
+        verbose: bool = False,
     ) -> None:
         self.name = name
         self.model = model or get_default_model()
@@ -79,6 +89,8 @@ class Agent:
         self.response_model = response_model
         self.max_iterations = max_iterations
         self.tool_calling = tool_calling
+        self.stream = stream
+        self.verbose = verbose
 
         # 工具注册表（直接挂载的工具，按名称去重）
         self._tools: dict[str, Tool] = {}

@@ -53,31 +53,55 @@ class ReActRunner:
         """
         agent = self._agent
         memory = agent.short_term_memory
+        verbose = agent.verbose
 
         # 把用户输入加入短期记忆
         memory.add(Message.user(user_input))
 
-        for _ in range(agent.max_iterations):
+        for iteration in range(agent.max_iterations):
+            if verbose:
+                print(f"\n[Iteration {iteration + 1}]")
+
             messages = memory.to_openai_messages()
             tools_schema = self._build_tools_schema() if agent.tool_calling else []
 
+            # 当 agent.stream=True 时，_call_llm 内部使用流式调用，
+            # 最终回答的 token 会实时打印到 stdout
             response_msg, tool_calls = self._call_llm(messages, tools_schema)
             memory.add(response_msg)
 
             if not tool_calls:
                 # LLM 不再调用工具，这是最终答复
-                if agent.response_model is not None:
-                    # 优先直接解析（system prompt 已注入 schema，LLM 通常直接输出 JSON）
-                    try:
-                        return self._parse_response_model(response_msg.content or "")
-                    except Exception:
-                        # 解析失败则兜底：追加格式要求再调用一次
-                        return self._coerce_to_model(memory.to_openai_messages())
-                return response_msg.content or ""
+                # （若 stream=True，内容已由 _call_llm 实时打印完毕）
+                content = response_msg.content or ""
 
-            # 执行所有工具调用，把结果追加到记忆
+                if agent.response_model is not None:
+                    try:
+                        return self._parse_response_model(content)
+                    except Exception:
+                        return self._coerce_to_model(memory.to_openai_messages())
+
+                if verbose and not agent.stream:
+                    # stream=True 时内容已流式打印，不重复输出
+                    print(f"\n[Final Answer]\n{content}")
+
+                return content
+
+            # ── 有工具调用 ────────────────────────────────────────────────
+            # verbose: 打印 Thought（模型在工具调用前输出的内容，若有）
+            if verbose and response_msg.content:
+                print(f"\n[Thought]\n{response_msg.content}")
+
             for tc in tool_calls:
+                if verbose:
+                    args_str = json.dumps(tc.arguments, ensure_ascii=False)
+                    print(f"\n[Action] {tc.name}({args_str})")
+
                 result = self._invoke_tool(tc)
+
+                if verbose:
+                    print(f"[Observation] {result}")
+
                 memory.add(
                     Message.tool_result(
                         tool_call_id=tc.id,
@@ -87,14 +111,13 @@ class ReActRunner:
                 )
 
         # 超过最大迭代次数，强制返回
+        last_content = memory.get_history()[-1].content or ""
         if agent.response_model is not None:
-            last_content = memory.get_history()[-1].content or ""
             try:
                 return self._parse_response_model(last_content)
             except Exception:
                 return self._coerce_to_model(memory.to_openai_messages())
-        last = memory.get_history()[-1]
-        return last.content or ""
+        return last_content
 
     # ------------------------------------------------------------------ #
     # 内部方法
@@ -109,7 +132,10 @@ class ReActRunner:
         messages: list[dict],
         tools_schema: list[dict],
     ) -> tuple[Message, list[ToolCall] | None]:
-        """调用 LLM，返回 (Message, tool_calls | None)。"""
+        """调用 LLM，返回 (Message, tool_calls | None)。
+
+        当 agent.stream=True 时，使用流式接口并实时将 token 打印到 stdout。
+        """
         kwargs: dict[str, Any] = {
             "model": self._agent.model,
             "messages": messages,
@@ -117,6 +143,8 @@ class ReActRunner:
         if tools_schema:
             kwargs["tools"] = tools_schema
             kwargs["tool_choice"] = "auto"
+        if self._agent.stream:
+            kwargs["stream"] = True
 
         try:
             response = self._client.chat.completions.create(**kwargs)
@@ -137,10 +165,71 @@ class ReActRunner:
             else:
                 raise
 
+        if self._agent.stream:
+            return self._consume_stream(response)
+
         choice = response.choices[0]
         msg = Message.from_openai_choice(choice)
-        tool_calls = msg.tool_calls  # None 或 list[ToolCall]
-        return msg, tool_calls
+        return msg, msg.tool_calls
+
+    def _consume_stream(self, stream: Any) -> tuple[Message, list[ToolCall] | None]:
+        """消费流式响应，实时打印 content token，累积 tool_calls，返回完整 Message。
+
+        注意：对于工具调用响应，模型通常不输出 content，因此不会有额外的打印。
+        对于最终回答，content token 会实时输出到 stdout。
+        """
+        content_parts: list[str] = []
+        tool_calls_acc: dict[int, dict] = {}  # index → {id, name, arguments}
+        printed_any = False
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # 打印 content token
+            if delta.content:
+                content_parts.append(delta.content)
+                print(delta.content, end="", flush=True)
+                printed_any = True
+
+            # 累积 tool_calls
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        tool_calls_acc[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tool_calls_acc[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tool_calls_acc[idx][
+                                "arguments"
+                            ] += tc_delta.function.arguments
+
+        if printed_any:
+            print()  # 流式内容打印完毕后换行
+
+        content = "".join(content_parts)
+
+        if tool_calls_acc:
+            tool_calls: list[ToolCall] = []
+            for idx in sorted(tool_calls_acc.keys()):
+                tc = tool_calls_acc[idx]
+                try:
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append(
+                    ToolCall(id=tc["id"], name=tc["name"], arguments=args)
+                )
+            msg = Message(role=Role.ASSISTANT, content=content, tool_calls=tool_calls)
+            return msg, tool_calls
+
+        msg = Message(role=Role.ASSISTANT, content=content)
+        return msg, None
 
     def _call_structured(self, messages: list[dict]) -> BaseModel:
         """使用 OpenAI Structured Outputs 接口，强制返回 Pydantic 实例。"""
